@@ -1,36 +1,107 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# FireSpread Simulator
 
-## Getting Started
+Simulador interactivo de propagación de incendios forestales con backend integration.
 
-First, run the development server:
+## 🚀 Características
 
-```bash
+### Frontend
+- **Mapas específicos**: Terrenos dibujados para cada tipo de vegetación
+- **Simulación en tiempo real**: Visualización de propagación de fuego
+- **Backend ready**: Completamente preparado para conectar con API
+- **WebSocket support**: Actualizaciones en tiempo real
+- **Gestión de escenarios**: Guardar y cargar configuraciones
+
+### Backend Integration
+- **API REST**: Endpoints completos para simulaciones y escenarios
+- **WebSocket**: Conexión en tiempo real para updates
+- **Fallback local**: Funciona sin backend como respaldo
+- **Error handling**: Manejo robusto de errores de conexión
+
+## 🛠️ Configuración
+
+### Variables de Entorno
+\`\`\`bash
+cp .env.example .env.local
+\`\`\`
+
+Configura las siguientes variables:
+- `NEXT_PUBLIC_API_URL`: URL del backend API
+- `NEXT_PUBLIC_API_KEY`: Clave de API (opcional)
+
+### Instalación
+\`\`\`bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+\`\`\`
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## 📡 API Endpoints
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### Simulaciones
+- `POST /api/simulations` - Crear simulación
+- `POST /api/simulations/{id}/start` - Iniciar simulación
+- `POST /api/simulations/{id}/pause` - Pausar simulación
+- `POST /api/simulations/{id}/stop` - Detener simulación
+- `GET /api/simulations/{id}` - Estado de simulación
+- `DELETE /api/simulations/{id}` - Eliminar simulación
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+### Escenarios
+- `GET /api/scenarios` - Listar escenarios
+- `POST /api/scenarios` - Crear escenario
+- `GET /api/scenarios/{id}` - Obtener escenario
+- `PUT /api/scenarios/{id}` - Actualizar escenario
+- `DELETE /api/scenarios/{id}` - Eliminar escenario
 
-## Learn More
+### WebSocket
+- `WS /ws/simulations/{id}` - Updates en tiempo real
 
-To learn more about Next.js, take a look at the following resources:
+## 🎨 Tipos de Terreno
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+1. **Bosque**: Árboles densos con claros
+2. **Pastizal**: Hierba con arbustos dispersos
+3. **Matorral**: Vegetación baja con rocas
+4. **Agrícola**: Cultivos en filas con edificios
+5. **Urbano**: Edificios con calles y parques
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## 🔧 Estructura del Proyecto
 
-## Deploy on Vercel
+\`\`\`
+├── components/
+│   ├── MapVisualization.tsx    # Mapa con terrenos dibujados
+│   ├── ParameterPanel.tsx      # Panel de configuración
+│   ├── SimulationControls.tsx  # Controles de simulación
+│   └── ConnectionStatus.tsx    # Estado de conexión
+├── contexts/
+│   └── SimulationContext.tsx   # Estado global con backend
+├── services/
+│   └── api.ts                  # Cliente API completo
+├── hooks/
+│   └── useApi.ts              # Hooks para API calls
+└── types/
+    └── simulation.ts          # Tipos TypeScript
+\`\`\`
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## 🌐 Backend Requirements
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+El backend debe implementar:
+- REST API con los endpoints listados
+- WebSocket para updates en tiempo real
+- Base de datos para escenarios
+- Algoritmo de simulación de fuego
+
+Ejemplo de respuesta de simulación:
+\`\`\`json
+{
+  "simulationId": "sim_123",
+  "status": "running",
+  "currentTime": 45,
+  "fireCells": [
+    {
+      "x": -0.5,
+      "y": 0.3,
+      "intensity": 85,
+      "temperature": 650,
+      "burnTime": 30,
+      "state": "burning"
+    }
+  ]
+}
