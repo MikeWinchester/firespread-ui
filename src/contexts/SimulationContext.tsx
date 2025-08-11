@@ -10,6 +10,7 @@ interface SimulationContextType {
   parameters: SimulationParameters
   currentSimulationId: string | null
   isConnected: boolean
+  connectionStatus: "checking" | "connected" | "disconnected" | "error"
   updateParameters: (params: Partial<SimulationParameters>) => void
   addIgnitionPoint: (point: Omit<IgnitionPoint, "id" | "timestamp">) => void
   removeIgnitionPoint: (id: string) => void
@@ -19,6 +20,7 @@ interface SimulationContextType {
   resetSimulation: () => void
   loadScenario: (scenarioId: string) => Promise<void>
   saveScenario: (name: string, description: string) => Promise<void>
+  checkBackendConnection: () => Promise<boolean>
 }
 
 type SimulationAction =
@@ -124,7 +126,13 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   const [parameters, setParameters] = React.useState<SimulationParameters>(initialParameters)
   const [currentSimulationId, setCurrentSimulationId] = React.useState<string | null>(null)
   const [isConnected, setIsConnected] = React.useState(false)
-  const fallbackIntervalRef = useRef<NodeJS.Timeout>(null)
+  const [connectionStatus, setConnectionStatus] = React.useState<"checking" | "connected" | "disconnected" | "error">(
+    "checking",
+  )
+  const fallbackIntervalRef = useRef<NodeJS.Timeout>(undefined)
+  const isSimulationRunning = useRef(false)
+  const wsReconnectAttempts = useRef(0)
+  const maxReconnectAttempts = 3
 
   const updateParameters = useCallback((params: Partial<SimulationParameters>) => {
     setParameters((prev) => ({ ...prev, ...params }))
@@ -143,127 +151,310 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     dispatch({ type: "REMOVE_IGNITION_POINT", payload: id })
   }, [])
 
+  // Check backend connection
+  const checkBackendConnection = useCallback(async (): Promise<boolean> => {
+    console.log("🔍 Checking backend connection...")
+    setConnectionStatus("checking")
+
+    try {
+      const response = await apiService.healthCheck()
+
+      if (response.success) {
+        console.log("✅ Backend connected successfully")
+        setIsConnected(true)
+        setConnectionStatus("connected")
+        return true
+      } else {
+        console.log("❌ Backend health check failed:", response.error)
+        setIsConnected(false)
+        setConnectionStatus("error")
+        return false
+      }
+    } catch (error) {
+      console.log("❌ Backend connection error:", error)
+      setIsConnected(false)
+      setConnectionStatus("disconnected")
+      return false
+    }
+  }, [])
+
+  // Enhanced fallback simulation
+  const startFallbackSimulation = useCallback(() => {
+    if (isSimulationRunning.current || state.ignitionPoints.length === 0) return
+
+    isSimulationRunning.current = true
+    console.log("🔥 Starting LOCAL fallback simulation")
+
+    fallbackIntervalRef.current = setInterval(() => {
+      // Enhanced fire spread simulation
+      const newFireCells: FireCell[] = state.ignitionPoints.map((point, index) => {
+        const windEffect = Math.cos((parameters.windDirection * Math.PI) / 180) * parameters.windSpeed * 0.0001
+        const windEffectY = Math.sin((parameters.windDirection * Math.PI) / 180) * parameters.windSpeed * 0.0001
+        const humidityEffect = (100 - parameters.humidity) / 100
+        const slopeEffect = parameters.slope * 0.001
+        const timeEffect = state.currentTime * 0.01
+
+        // More realistic fire spread
+        const spreadRadius = 0.02 + timeEffect * 0.005
+        const intensity = Math.max(10, 100 * humidityEffect * (1 - timeEffect * 0.02))
+
+        return {
+          x: point.lng + Math.sin(timeEffect + index) * spreadRadius + windEffect,
+          y: point.lat + Math.cos(timeEffect + index) * spreadRadius + windEffectY + slopeEffect,
+          intensity: Math.max(0, intensity + (Math.random() - 0.5) * 20),
+          temperature: 200 + intensity * 6 + Math.random() * 100,
+          burnTime: state.currentTime,
+          state: "burning" as const,
+        }
+      })
+
+      dispatch({ type: "UPDATE_FIRE_CELLS", payload: newFireCells })
+      dispatch({ type: "UPDATE_TIME", payload: state.currentTime + 1 })
+    }, 1000) // 1 second intervals
+  }, [state.ignitionPoints, state.currentTime, parameters])
+
+  const stopFallbackSimulation = useCallback(() => {
+    if (fallbackIntervalRef.current) {
+      clearInterval(fallbackIntervalRef.current)
+      fallbackIntervalRef.current = undefined
+    }
+    isSimulationRunning.current = false
+    console.log("⏹️ Stopped fallback simulation")
+  }, [])
+
+  // WebSocket connection with retry logic
+  const connectWebSocket = useCallback(
+    (simulationId: string) => {
+      console.log("🔌 Attempting WebSocket connection...")
+
+      apiService.connectWebSocket(
+        simulationId,
+        (data) => {
+          console.log("📡 Received WebSocket data:", data)
+          dispatch({ type: "UPDATE_FROM_BACKEND", payload: data })
+          wsReconnectAttempts.current = 0 // Reset on successful message
+        },
+        (error) => {
+          console.error("❌ WebSocket error:", error)
+          wsReconnectAttempts.current++
+
+          if (wsReconnectAttempts.current < maxReconnectAttempts) {
+            console.log(`🔄 Retrying WebSocket connection (${wsReconnectAttempts.current}/${maxReconnectAttempts})...`)
+            setTimeout(() => connectWebSocket(simulationId), 2000)
+          } else {
+            console.log("❌ Max WebSocket reconnection attempts reached, falling back to local simulation")
+            setIsConnected(false)
+            setConnectionStatus("error")
+            startFallbackSimulation()
+          }
+        },
+        (event) => {
+          console.log("🔌 WebSocket closed:", event.code, event.reason)
+          setIsConnected(false)
+
+          if (event.code !== 1000) {
+            // Not a normal closure
+            setConnectionStatus("error")
+            if (wsReconnectAttempts.current < maxReconnectAttempts) {
+              setTimeout(() => connectWebSocket(simulationId), 2000)
+            } else {
+              startFallbackSimulation()
+            }
+          }
+        },
+      )
+    },
+    [startFallbackSimulation],
+  )
+
   // Backend integration functions
   const startSimulation = useCallback(async () => {
-    try {
-      if (!currentSimulationId) {
-        // Create new simulation
-        const response = await apiService.createSimulation({
-          parameters: {
-            vegetationType: parameters.vegetationType,
-            windSpeed: parameters.windSpeed,
-            windDirection: parameters.windDirection,
-            humidity: parameters.humidity,
-            slope: parameters.slope,
-          },
-          ignitionPoints: state.ignitionPoints,
-        })
+    console.log("🚀 Starting simulation...")
 
-        if (response.success && response.data) {
-          setCurrentSimulationId(response.data.simulationId)
+    // First, ensure we have a backend connection
+    const backendAvailable = await checkBackendConnection()
 
-          // Connect WebSocket for real-time updates
-          apiService.connectWebSocket(
-            response.data.simulationId,
-            (data) => {
-              dispatch({ type: "UPDATE_FROM_BACKEND", payload: data })
+    if (backendAvailable) {
+      try {
+        console.log("🌐 Attempting to use BACKEND simulation")
+
+        // Create simulation if we don't have one
+        if (!currentSimulationId) {
+          console.log("📝 Creating new simulation on backend...")
+          const response = await apiService.createSimulation({
+            parameters: {
+              vegetationType: parameters.vegetationType,
+              windSpeed: parameters.windSpeed,
+              windDirection: parameters.windDirection,
+              humidity: parameters.humidity,
+              slope: parameters.slope,
             },
-            (error) => {
-              console.error("WebSocket error:", error)
-              setIsConnected(false)
-            },
-            () => {
-              setIsConnected(false)
-            },
-          )
-          setIsConnected(true)
+            ignitionPoints: state.ignitionPoints,
+          })
+
+          if (response.success && response.data) {
+            console.log("✅ Simulation created:", response.data.simulationId)
+            setCurrentSimulationId(response.data.simulationId)
+            connectWebSocket(response.data.simulationId)
+          } else {
+            throw new Error(response.error || "Failed to create simulation")
+          }
         }
-      }
 
-      if (currentSimulationId) {
-        const response = await apiService.startSimulation(currentSimulationId)
-        if (response.success) {
-          dispatch({ type: "START_SIMULATION" })
+        // Start the simulation
+        if (currentSimulationId) {
+          console.log("▶️ Starting backend simulation...")
+          const response = await apiService.startSimulation(currentSimulationId)
+
+          if (response.success) {
+            console.log("✅ Backend simulation started successfully")
+            dispatch({ type: "START_SIMULATION" })
+            return
+          } else {
+            throw new Error(response.error || "Failed to start simulation")
+          }
         }
+      } catch (error) {
+        console.error("❌ Backend simulation failed:", error)
+        setIsConnected(false)
+        setConnectionStatus("error")
       }
-    } catch (error) {
-      console.error("Error starting simulation:", error)
-      // Fallback to local simulation
-      dispatch({ type: "START_SIMULATION" })
     }
-  }, [currentSimulationId, parameters, state.ignitionPoints])
+
+    // Fallback to local simulation
+    console.log("🏠 Using LOCAL simulation (backend unavailable)")
+    dispatch({ type: "START_SIMULATION" })
+    startFallbackSimulation()
+  }, [
+    currentSimulationId,
+    parameters,
+    state.ignitionPoints,
+    checkBackendConnection,
+    connectWebSocket,
+    startFallbackSimulation,
+  ])
 
   const pauseSimulation = useCallback(async () => {
-    try {
-      if (currentSimulationId) {
+    console.log("⏸️ Pausing simulation...")
+
+    if (currentSimulationId && isConnected) {
+      try {
+        console.log("🌐 Pausing BACKEND simulation")
         const response = await apiService.pauseSimulation(currentSimulationId)
+
         if (response.success) {
+          console.log("✅ Backend simulation paused")
           dispatch({ type: "PAUSE_SIMULATION" })
+          return
+        } else {
+          throw new Error(response.error || "Failed to pause simulation")
         }
+      } catch (error) {
+        console.error("❌ Failed to pause backend simulation:", error)
+        setIsConnected(false)
+        setConnectionStatus("error")
       }
-    } catch (error) {
-      console.error("Error pausing simulation:", error)
-      // Fallback to local pause
-      dispatch({ type: "PAUSE_SIMULATION" })
     }
-  }, [currentSimulationId])
+
+    // Fallback to local pause
+    console.log("🏠 Pausing LOCAL simulation")
+    dispatch({ type: "PAUSE_SIMULATION" })
+    stopFallbackSimulation()
+  }, [currentSimulationId, isConnected, stopFallbackSimulation])
 
   const stopSimulation = useCallback(async () => {
-    try {
-      if (currentSimulationId) {
+    console.log("⏹️ Stopping simulation...")
+
+    if (currentSimulationId && isConnected) {
+      try {
+        console.log("🌐 Stopping BACKEND simulation")
         const response = await apiService.stopSimulation(currentSimulationId)
+
         if (response.success) {
-          dispatch({ type: "STOP_SIMULATION" })
+          console.log("✅ Backend simulation stopped")
         }
 
         // Disconnect WebSocket
         apiService.disconnectWebSocket()
-        setIsConnected(false)
         setCurrentSimulationId(null)
+      } catch (error) {
+        console.error("❌ Failed to stop backend simulation:", error)
       }
-    } catch (error) {
-      console.error("Error stopping simulation:", error)
-      // Fallback to local stop
-      dispatch({ type: "STOP_SIMULATION" })
     }
-  }, [currentSimulationId])
+
+    // Always stop local simulation
+    console.log("🏠 Stopping LOCAL simulation")
+    dispatch({ type: "STOP_SIMULATION" })
+    stopFallbackSimulation()
+    setIsConnected(false)
+    setConnectionStatus("disconnected")
+  }, [currentSimulationId, isConnected, stopFallbackSimulation])
 
   const resetSimulation = useCallback(() => {
+    console.log("🔄 Resetting simulation...")
+    stopFallbackSimulation()
+
     if (currentSimulationId) {
       apiService.disconnectWebSocket()
-      setIsConnected(false)
       setCurrentSimulationId(null)
     }
+
+    setIsConnected(false)
+    setConnectionStatus("disconnected")
     dispatch({ type: "RESET_SIMULATION" })
-  }, [currentSimulationId])
+  }, [currentSimulationId, stopFallbackSimulation])
 
-  const loadScenario = useCallback(async (scenarioId: string) => {
-    try {
-      const response = await apiService.getScenario(scenarioId)
-      if (response.success && response.data) {
-        // Ensure vegetationType is properly typed
-        const scenarioParameters: SimulationParameters = {
-          vegetationType: response.data.parameters.vegetationType as VegetationType,
-          windSpeed: response.data.parameters.windSpeed,
-          windDirection: response.data.parameters.windDirection,
-          humidity: response.data.parameters.humidity,
-          slope: response.data.parameters.slope,
-        }
+  const loadScenario = useCallback(
+    async (scenarioId: string) => {
+      console.log("📂 Loading scenario:", scenarioId)
 
-        setParameters(scenarioParameters)
-        // Clear existing points and add scenario points
-        dispatch({ type: "RESET_SIMULATION" })
-        response.data.ignitionPoints.forEach((point) => {
-          dispatch({ type: "ADD_IGNITION_POINT", payload: point })
-        })
+      const backendAvailable = await checkBackendConnection()
+
+      if (!backendAvailable) {
+        console.log("❌ Cannot load scenario: backend not available")
+        return
       }
-    } catch (error) {
-      console.error("Error loading scenario:", error)
-    }
-  }, [])
+
+      try {
+        const response = await apiService.getScenario(scenarioId)
+
+        if (response.success && response.data) {
+          console.log("✅ Scenario loaded successfully")
+          const scenarioParameters: SimulationParameters = {
+            vegetationType: response.data.parameters.vegetationType as VegetationType,
+            windSpeed: response.data.parameters.windSpeed,
+            windDirection: response.data.parameters.windDirection,
+            humidity: response.data.parameters.humidity,
+            slope: response.data.parameters.slope,
+          }
+
+          setParameters(scenarioParameters)
+          dispatch({ type: "RESET_SIMULATION" })
+          response.data.ignitionPoints.forEach((point) => {
+            dispatch({ type: "ADD_IGNITION_POINT", payload: point })
+          })
+        } else {
+          throw new Error(response.error || "Failed to load scenario")
+        }
+      } catch (error) {
+        console.error("❌ Error loading scenario:", error)
+      }
+    },
+    [checkBackendConnection],
+  )
 
   const saveScenario = useCallback(
     async (name: string, description: string) => {
+      console.log("💾 Saving scenario:", name)
+
+      const backendAvailable = await checkBackendConnection()
+
+      if (!backendAvailable) {
+        console.log("❌ Cannot save scenario: backend not available")
+        alert("No se puede guardar el escenario: backend no disponible")
+        return
+      }
+
       try {
         const response = await apiService.createScenario({
           name,
@@ -279,63 +470,47 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         })
 
         if (response.success) {
-          console.log("Scenario saved successfully")
+          console.log("✅ Scenario saved successfully")
+          alert("Escenario guardado exitosamente")
+        } else {
+          throw new Error(response.error || "Failed to save scenario")
         }
       } catch (error) {
-        console.error("Error saving scenario:", error)
+        console.error("❌ Error saving scenario:", error)
+        alert("Error al guardar el escenario")
       }
     },
-    [parameters, state.ignitionPoints],
+    [parameters, state.ignitionPoints, checkBackendConnection],
   )
 
-  // Fallback simulation when backend is not available
+  // Check backend connection on mount
   useEffect(() => {
-    if (state.isRunning && !isConnected && state.ignitionPoints.length > 0) {
-      fallbackIntervalRef.current = setInterval(() => {
-        // Enhanced fire spread simulation
-        const newFireCells: FireCell[] = state.ignitionPoints.map((point, index) => {
-          const windEffect = parameters.windDirection * 0.001
-          const humidityEffect = (100 - parameters.humidity) / 100
-          const slopeEffect = parameters.slope * 0.01
-          const windSpeedEffect = parameters.windSpeed * 0.001
-
-          return {
-            x: point.lng + (Math.random() - 0.5) * 0.02 * humidityEffect + windEffect,
-            y: point.lat + (Math.random() - 0.5) * 0.02 * humidityEffect + slopeEffect,
-            intensity: Math.min(100, Math.random() * 100 * humidityEffect * (1 + windSpeedEffect)),
-            temperature: 200 + Math.random() * 800 * humidityEffect,
-            burnTime: state.currentTime,
-            state: "burning" as const,
-          }
-        })
-
-        dispatch({ type: "UPDATE_FIRE_CELLS", payload: newFireCells })
-        dispatch({ type: "UPDATE_TIME", payload: state.currentTime + 1 })
-      }, 1000)
-    }
-
-    return () => {
-      if (fallbackIntervalRef.current) {
-        clearInterval(fallbackIntervalRef.current)
-      }
-    }
-  }, [state.isRunning, isConnected, state.ignitionPoints, state.currentTime, parameters])
+    console.log("🔄 Initializing backend connection check...")
+    checkBackendConnection()
+  }, [checkBackendConnection])
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      console.log("🧹 Cleaning up simulation context...")
+      stopFallbackSimulation()
       apiService.disconnectWebSocket()
-      if (fallbackIntervalRef.current) {
-        clearInterval(fallbackIntervalRef.current)
-      }
     }
-  }, [])
+  }, [stopFallbackSimulation])
+
+  // Stop simulation when component unmounts or state changes
+  useEffect(() => {
+    if (!state.isRunning) {
+      stopFallbackSimulation()
+    }
+  }, [state.isRunning, stopFallbackSimulation])
 
   const value: SimulationContextType = {
     state,
     parameters,
     currentSimulationId,
     isConnected,
+    connectionStatus,
     updateParameters,
     addIgnitionPoint,
     removeIgnitionPoint,
@@ -345,6 +520,7 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     resetSimulation,
     loadScenario,
     saveScenario,
+    checkBackendConnection,
   }
 
   return <SimulationContext.Provider value={value}>{children}</SimulationContext.Provider>
